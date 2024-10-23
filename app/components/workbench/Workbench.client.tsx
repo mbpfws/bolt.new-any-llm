@@ -1,7 +1,7 @@
 import { useStore } from '@nanostores/react';
 import { motion, type HTMLMotionProps, type Variants } from 'framer-motion';
 import { computed } from 'nanostores';
-import { memo, useCallback, useEffect } from 'react';
+import { memo, useCallback, useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import {
   type OnChangeCallback as OnEditorChange,
@@ -56,6 +56,8 @@ const workbenchVariants = {
 export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => {
   renderLogger.trace('Workbench');
 
+  const [isSyncing, setIsSyncing] = useState(false);
+
   const hasPreview = useStore(computed(workbenchStore.previews, (previews) => previews.length > 0));
   const showWorkbench = useStore(workbenchStore.showWorkbench);
   const selectedFile = useStore(workbenchStore.selectedFile);
@@ -98,6 +100,21 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
 
   const onFileReset = useCallback(() => {
     workbenchStore.resetCurrentDocument();
+  }, []);
+
+  const handleSyncFiles = useCallback(async () => {
+    setIsSyncing(true);
+
+    try {
+      const directoryHandle = await window.showDirectoryPicker();
+      await workbenchStore.syncFiles(directoryHandle);
+      toast.success('Files synced successfully');
+    } catch (error) {
+      console.error('Error syncing files:', error);
+      toast.error('Failed to sync files');
+    } finally {
+      setIsSyncing(false);
+    }
   }, []);
 
   return (
@@ -144,6 +161,10 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
                     >
                       <div className="i-ph:code" />
                       Download Code
+                    </PanelHeaderButton>
+                    <PanelHeaderButton className="mr-1 text-sm" onClick={handleSyncFiles} disabled={isSyncing}>
+                      {isSyncing ? <div className="i-ph:spinner" /> : <div className="i-ph:cloud-arrow-down" />}
+                      {isSyncing ? 'Syncing...' : 'Sync Files'}
                     </PanelHeaderButton>
                     <PanelHeaderButton
                       className="mr-1 text-sm"
@@ -197,7 +218,6 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkspaceProps) => 
     )
   );
 });
-
 interface ViewProps extends HTMLMotionProps<'div'> {
   children: JSX.Element;
 }

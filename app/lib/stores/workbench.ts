@@ -11,7 +11,6 @@ import { PreviewsStore } from './previews';
 import { TerminalStore } from './terminal';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
-import { logger } from '~/utils/logger';
 
 export interface ArtifactState {
   id: string;
@@ -281,21 +280,22 @@ export class WorkbenchStore {
 
     for (const [filePath, dirent] of Object.entries(files)) {
       if (dirent?.type === 'file' && !dirent.isBinary) {
-        // Remove '/home/project/' from the beginning of the path
+        // remove '/home/project/' from the beginning of the path
         const relativePath = filePath.replace(/^\/home\/project\//, '');
 
-        // Split the path into segments
+        // split the path into segments
         const pathSegments = relativePath.split('/');
 
-        // If there's more than one segment, we need to create folders
+        // if there's more than one segment, we need to create folders
         if (pathSegments.length > 1) {
           let currentFolder = zip;
+
           for (let i = 0; i < pathSegments.length - 1; i++) {
             currentFolder = currentFolder.folder(pathSegments[i])!;
           }
           currentFolder.file(pathSegments[pathSegments.length - 1], dirent.content);
         } else {
-          // If there's only one segment, it's a file in the root
+          // if there's only one segment, it's a file in the root
           zip.file(relativePath, dirent.content);
         }
       }
@@ -305,77 +305,33 @@ export class WorkbenchStore {
     saveAs(content, 'project.zip');
   }
 
-  async uploadFolder(files: FileList | null) {
-    if (!files) return;
+  async syncFiles(targetHandle: FileSystemDirectoryHandle) {
+    const files = this.files.get();
+    const syncedFiles = [];
 
-    const ignoredFiles = [
-      '.git/',
-      '.gitignore',
-      '.DS_Store',
-      '.vscode/',
-      'node_modules',
-      '.lock',
-      '-lock.json',
-      'bin/',
-      'obj/',
-      'packages/',
-      'dist/',
-      'build/',
-    ];
+    for (const [filePath, dirent] of Object.entries(files)) {
+      if (dirent?.type === 'file' && !dirent.isBinary) {
+        const relativePath = filePath.replace(/^\/home\/project\//, '');
+        const pathSegments = relativePath.split('/');
+        let currentHandle = targetHandle;
 
-    const container = await webcontainer; // Access the webcontainer instance
-
-    const folders = new Set(
-      Array.from(files).flatMap((file) => {
-        const filePath = file.webkitRelativePath || file.name;
-        if (ignoredFiles.some((ignoredFile) => filePath.includes(ignoredFile))) {
-          return [];
+        for (let i = 0; i < pathSegments.length - 1; i++) {
+          currentHandle = await currentHandle.getDirectoryHandle(pathSegments[i], { create: true });
         }
-        const parts = filePath.split('/').slice(0, -1);
-        return parts.map((_, i) => parts.slice(0, i + 1).join('/'));
-      }),
-    );
 
-    for (const folder of folders) {
-      await container.fs.mkdir(folder, { recursive: true }); // Create folders recursively
-    }
+        // create or get the file
+        const fileHandle = await currentHandle.getFileHandle(pathSegments[pathSegments.length - 1], { create: true });
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const filePath = file.webkitRelativePath || file.name;
+        // write the file content
+        const writable = await fileHandle.createWritable();
+        await writable.write(dirent.content);
+        await writable.close();
 
-      if (ignoredFiles.some((ignoredFile) => filePath.includes(ignoredFile))) {
-        continue;
-      }
-
-      try {
-        const content = await this.#readFileContent(file);
-        await container.fs.writeFile(filePath, content);
-      } catch (error) {
-        logger.error('Failed to create file\n\n', error);
+        syncedFiles.push(relativePath);
       }
     }
-  }
 
-  #readFileContent(file: File): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-
-      reader.onload = (event) => {
-        const result = event.target?.result;
-        if (typeof result === 'string') {
-          resolve(result);
-        } else {
-          reject(new Error('Failed to read file content'));
-        }
-      };
-
-      reader.onerror = () => {
-        reject(new Error('Failed to read file'));
-      };
-
-      reader.readAsText(file); // Adjust if binary file handling is required
-    });
+    return syncedFiles;
   }
 }
 
