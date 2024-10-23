@@ -2,12 +2,12 @@ import type { PathWatcherEvent, WebContainer } from '@webcontainer/api';
 import { getEncoding } from 'istextorbinary';
 import { map, type MapStore } from 'nanostores';
 import { Buffer } from 'node:buffer';
-import * as nodePath from 'node:path';
 import { bufferWatchEvents } from '~/utils/buffer';
 import { WORK_DIR } from '~/utils/constants';
 import { computeFileModifications } from '~/utils/diff';
 import { createScopedLogger } from '~/utils/logger';
-import { unreachable } from '~/utils/unreachable';
+import { debounce } from 'lodash';
+import * as diff from 'diff';
 
 const logger = createScopedLogger('FilesStore');
 
@@ -51,12 +51,23 @@ export class FilesStore {
     return this.#size;
   }
 
+  #contentCache: Map<string, string> = new Map();
+  #saveDebounce: Map<string, ReturnType<typeof debounce>> = new Map();
+
   constructor(webcontainerPromise: Promise<WebContainer>) {
     this.#webcontainer = webcontainerPromise;
+
+    this.#contentCache = new Map();
+    this.#saveDebounce = new Map();
 
     if (import.meta.hot) {
       import.meta.hot.data.files = this.files;
       import.meta.hot.data.modifiedFiles = this.#modifiedFiles;
+      import.meta.hot.dispose(() => {
+        for (const debounceFn of this.#saveDebounce.values()) {
+          debounceFn.cancel();
+        }
+      });
     }
 
     this.#init();
@@ -80,37 +91,46 @@ export class FilesStore {
     this.#modifiedFiles.clear();
   }
 
-  async saveFile(filePath: string, content: string) {
-    const webcontainer = await this.#webcontainer;
+  async setFileContent(path: string, content: string) {
+    const sanitizedPath = this.#sanitizePath(path);
+    const file = this.files.get()[sanitizedPath];
 
-    try {
-      const relativePath = nodePath.relative(webcontainer.workdir, filePath);
-
-      if (!relativePath) {
-        throw new Error(`EINVAL: invalid file path, write '${relativePath}'`);
-      }
-
-      const oldContent = this.getFile(filePath)?.content;
-
-      if (!oldContent) {
-        unreachable('Expected content to be defined');
-      }
-
-      await webcontainer.fs.writeFile(relativePath, content);
-
-      if (!this.#modifiedFiles.has(filePath)) {
-        this.#modifiedFiles.set(filePath, oldContent);
-      }
-
-      // we immediately update the file and don't rely on the `change` event coming from the watcher
-      this.files.setKey(filePath, { type: 'file', content, isBinary: false });
-
-      logger.info('File updated');
-    } catch (error) {
-      logger.error('Failed to update file content\n\n', error);
-
-      throw error;
+    if (!file || file.type !== 'file') {
+      throw new Error(`File not found: ${sanitizedPath}`);
     }
+
+    const cachedContent = this.#contentCache.get(sanitizedPath);
+
+    if (cachedContent === content) {
+      return; // Content hasn't changed, no need to update
+    }
+
+    this.#contentCache.set(sanitizedPath, content);
+
+    if (!this.#saveDebounce.has(sanitizedPath)) {
+      this.#saveDebounce.set(
+        sanitizedPath,
+        debounce(async (path: string, content: string) => {
+          const webcontainer = await this.#webcontainer;
+          try {
+            const currentContent = await webcontainer.fs.readFile(path, 'utf-8');
+            
+            if (diff.diffChars(currentContent, content).length > 1) {
+              await webcontainer.fs.writeFile(path, content);
+              this.files.setKey(path, { ...file, content });
+              
+              if (!this.#modifiedFiles.has(path)) {
+                this.#modifiedFiles.set(path, currentContent);
+              }
+            }
+          } catch (error) {
+            logger.error(`Failed to update file ${path}\n\n`, error);
+          }
+        }, 500)
+      );
+    }
+
+    this.#saveDebounce.get(sanitizedPath)!(sanitizedPath, content);
   }
 
   async #init() {
@@ -138,7 +158,7 @@ export class FilesStore {
         case 'remove_dir': {
           this.files.setKey(sanitizedPath, undefined);
 
-          for (const [direntPath] of Object.entries(this.files)) {
+          for (const [direntPath] of Object.entries(this.files.get())) {
             if (direntPath.startsWith(sanitizedPath)) {
               this.files.setKey(direntPath, undefined);
             }
@@ -179,6 +199,10 @@ export class FilesStore {
           // we don't care about these events
           break;
         }
+        default: {
+          logger.warn(`Unhandled event type: ${type}`);
+          break;
+        }
       }
     }
   }
@@ -191,9 +215,13 @@ export class FilesStore {
     try {
       return utf8TextDecoder.decode(buffer);
     } catch (error) {
-      console.log(error);
+      logger.error('Failed to decode file content', error);
       return '';
     }
+  }
+
+  #sanitizePath(path: string): string {
+    return path.replace(/\/+$/g, '');
   }
 }
 
@@ -207,7 +235,7 @@ function isBinaryFile(buffer: Uint8Array | undefined) {
 
 /**
  * Converts a `Uint8Array` into a Node.js `Buffer` by copying the prototype.
- * The goal is to  avoid expensive copies. It does create a new typed array
+ * The goal is to avoid expensive copies. It does create a new typed array
  * but that's generally cheap as long as it uses the same underlying
  * array buffer.
  */
