@@ -82,6 +82,11 @@ git clone https://github.com/coleam00/bolt.new-any-llm.git
 ```
 pnpm install
 ```
+NOTE: If you don't have the pnpm command installed, you can install pnpm with
+
+```bash
+npm i pnpm --global
+```
 
 If you get an error saying "command not found: pnpm" or similar, then that means pnpm isn't installed. You can install it via this:
 
